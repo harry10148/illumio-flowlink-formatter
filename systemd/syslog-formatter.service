@@ -1,0 +1,14 @@
+[Unit]
+Description=Forcepoint Syslog Formatter Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/flowlink
+ExecStart=/usr/bin/python3 /opt/flowlink/syslog-formatter.py --config /opt/flowlink/syslog-formatter.ini run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

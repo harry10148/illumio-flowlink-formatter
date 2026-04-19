@@ -1,0 +1,41 @@
+## Status
+
+- Date: 2026-04-19
+- Scope: Understand the purpose and operating model of this repository.
+- Current state: Repository contains a small FlowLink-related syslog relay setup rather than the FlowLink product itself.
+- Result: Project purpose has been traced and documented for handoff.
+- Review state: Reliability and efficiency review completed, then integrated into `syslog-formatter.py`.
+- Sample state: `Forcepoint_CEF0_1.txt` and `Forcepoint_CEF0_2.txt` reviewed against current formatter logic.
+- Config state:
+  - `config-syslog.yml` intentionally left unchanged for FlowLink ingestion.
+  - `syslog-formatter.ini` added for environment-specific relay and healthcheck settings.
+- Key components identified:
+  - `syslog-formatter.py`: UDP syslog cleaner/forwarder plus health-check entrypoint.
+  - `syslog-formatter.ini`: Runtime settings for listener ports, target ports, service names, and file paths.
+  - `config-syslog.yml`: FlowLink consumer config receiving cleaned logs on UDP 5514.
+  - `systemd/`: Suggested unit files for relay auto-restart and periodic health checks.
+  - `readme.txt`: SOP describing deployment layout under `/opt/flowlink/`.
+- Notable inconsistency:
+  - SOP references `config-syslog.yml`, but the formatter healthcheck defaults still point to `config-netflow.yml` in `syslog-formatter.ini`.
+- Functional summary:
+  - Receives Forcepoint CEF/syslog on UDP 514.
+  - Cleans log payloads for FlowLink compatibility.
+  - Forwards cleaned logs to local FlowLink on UDP 5514.
+  - Relies on FlowLink to push aggregated/encrypted data to SaaS.
+- Review highlights:
+  - Health-check logic now lives in Python and no longer relies on substring matching for `RUNNING`.
+  - The relay now logs packet-processing failures and supervises dead worker processes.
+- Sample highlights:
+  - Real logs are bare `CEF:` records without syslog headers, so header insertion is required.
+  - Real logs contain 13-digit millisecond timestamps in `start/end/rt/art`, and current normalization matches them.
+  - Real logs include non-ASCII Chinese text in `suser` and `cs1`; formatter now avoids that data-loss path by projecting only the required flow fields.
+  - Sample events shrink from roughly 2 KB to roughly 160 bytes after minimal-field projection.
+- Deployment highlights:
+  - `monitor_services.sh` has been removed.
+  - Relay and healthcheck are now configured through a single INI file and invoked directly from Python.
+  - Suggested `systemd` unit files have been added for service restart policy and timer-based health checks.
+  - Service naming is fully aligned on `syslog-formatter`.
+- Documentation highlights:
+  - `readme.txt` has been rewritten into Markdown format and consolidated with deployment, sample validation, runtime config, and systemd guidance.
+- Blockers:
+  - No Mem0 integration/tool available in this session, so external project memory could not be checked or updated.

@@ -1,0 +1,19 @@
+pce_addr: pce.lab.local:8443
+api_key: $cat /opt/flowlink/api_info
+data_directory: /opt/flowlink/data
+aggregation_minutes: 10
+consumers:
+  - name: Forcepoint_CEF_log
+    parser:
+      type: text
+      properties:
+        src_ip: src
+        dst_ip: dst
+        dst_port: dpt
+        protocol: tcp
+        timestamp: start
+        timestamp_format: unix
+    connectors:
+      - type: udp
+        properties:
+          ports: '5514'

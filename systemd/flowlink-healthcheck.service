@@ -1,0 +1,9 @@
+[Unit]
+Description=FlowLink and Syslog Formatter Health Check
+After=network-online.target syslog-formatter.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/flowlink
+ExecStart=/usr/bin/python3 /opt/flowlink/syslog-formatter.py --config /opt/flowlink/syslog-formatter.ini healthcheck
