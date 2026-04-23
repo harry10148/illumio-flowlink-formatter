@@ -117,7 +117,7 @@ workers = 4
 
 [healthcheck]
 flowlink_cmd = /usr/local/bin/illumio-flowlink-ctl
-flowlink_config = /opt/flowlink/config-netflow.yml
+flowlink_config = /opt/flowlink/config-syslog.yml
 flowlink_log = /opt/flowlink/data/flowlink.log
 relay_service = syslog-formatter
 backup_dir = /var/log/flowlink_crash_backups
@@ -261,12 +261,12 @@ ls -l /var/log/flowlink_crash_backups
 
 ### 12.1 FlowLink config 路徑需依現場確認
 
-目前 repo 內存在一個歷史差異：
+目前 repo 預設已對齊使用 `config-syslog.yml`：
 
 - 文件與 repo 中的 FlowLink 設定檔是 `config-syslog.yml`
-- `syslog-formatter.ini` 預設值仍是 `/opt/flowlink/config-netflow.yml`
+- `syslog-formatter.ini` 預設值為 `/opt/flowlink/config-syslog.yml`
 
-部署前請先確認現場實際使用哪一份，再修改 `syslog-formatter.ini`。
+若現場仍使用其他檔名（例如 `config-netflow.yml`），請同步修改 `syslog-formatter.ini` 的 `flowlink_config`。
 
 ### 12.2 `protocol: tcp` 仍維持現況
 

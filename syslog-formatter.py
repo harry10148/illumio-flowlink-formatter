@@ -32,7 +32,7 @@ FIELD_PATTERNS = {
 }
 
 DEFAULT_FLOWLINK_CMD = "/usr/local/bin/illumio-flowlink-ctl"
-DEFAULT_FLOWLINK_CONFIG = "/opt/flowlink/config-netflow.yml"
+DEFAULT_FLOWLINK_CONFIG = "/opt/flowlink/config-syslog.yml"
 DEFAULT_FLOWLINK_LOG = "/opt/flowlink/data/flowlink.log"
 DEFAULT_RELAY_SERVICE = "syslog-formatter"
 DEFAULT_BACKUP_DIR = "/var/log/flowlink_crash_backups"
@@ -144,9 +144,23 @@ def normalize_command_args(argv):
     return argv
 
 
-def create_listen_socket(listen_ip, listen_port):
+def supports_reuseport():
+    if not hasattr(socket, "SO_REUSEPORT"):
+        return False
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def create_listen_socket(listen_ip, listen_port, use_reuseport):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    if hasattr(socket, "SO_REUSEPORT"):
+    if use_reuseport:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RECV_BUFFER_SIZE)
     sock.bind((listen_ip, listen_port))
@@ -178,13 +192,13 @@ def process_packet(data):
     return f"{prefix}CEF:{minimal_cef}".encode("ascii")
 
 
-def run_worker(listen_ip, listen_port, target_ip, target_port):
+def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
     error_count = 0
     sock = None
     sender = None
 
     try:
-        sock = create_listen_socket(listen_ip, listen_port)
+        sock = create_listen_socket(listen_ip, listen_port, use_reuseport)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         log(
             f"Worker {os.getpid()} listening on UDP {listen_ip}:{listen_port} -> "
@@ -225,10 +239,10 @@ def run_worker(listen_ip, listen_port, target_ip, target_port):
             sock.close()
 
 
-def start_worker(slot, listen_ip, listen_port, target_ip, target_port):
+def start_worker(slot, listen_ip, listen_port, target_ip, target_port, use_reuseport):
     process = multiprocessing.Process(
         target=run_worker,
-        args=(listen_ip, listen_port, target_ip, target_port),
+        args=(listen_ip, listen_port, target_ip, target_port, use_reuseport),
         name=f"syslog-formatter-{slot}",
     )
     process.start()
@@ -239,10 +253,19 @@ def start_server(args):
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGTERM, handle_stop)
 
+    workers = args.workers
+    use_reuseport = supports_reuseport()
+    if workers > 1 and not use_reuseport:
+        log(
+            "SO_REUSEPORT is unavailable; falling back to a single worker.",
+            level="WARN",
+        )
+        workers = 1
+
     print("==================================================")
     print("   Forcepoint Syslog Formatter")
     print("==================================================")
-    print(f"Workers   : {args.workers}")
+    print(f"Workers   : {workers}")
     print(f"Listen    : {args.listen_ip}:{args.listen_port}")
     print(f"Forward   : {args.target_ip}:{args.target_port}")
     if args.config_path:
@@ -251,13 +274,14 @@ def start_server(args):
     print("==================================================")
 
     processes = {}
-    for slot in range(args.workers):
+    for slot in range(workers):
         processes[slot] = start_worker(
             slot,
             args.listen_ip,
             args.listen_port,
             args.target_ip,
             args.target_port,
+            use_reuseport,
         )
 
     try:
@@ -281,6 +305,7 @@ def start_server(args):
                     args.listen_port,
                     args.target_ip,
                     args.target_port,
+                    use_reuseport,
                 )
 
             time.sleep(SUPERVISOR_POLL_SECONDS)
