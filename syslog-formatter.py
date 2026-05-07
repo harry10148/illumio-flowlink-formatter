@@ -189,7 +189,7 @@ def process_packet(data):
 
     minimal_extension = " " + " ".join(selected_fields)
     minimal_cef = "|".join([*cef_parts[:7], minimal_extension])
-    return f"{prefix}CEF:{minimal_cef}".encode("ascii")
+    return f"{prefix}CEF:{minimal_cef}".encode("utf-8")
 
 
 def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
@@ -198,6 +198,8 @@ def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
     sender = None
 
     try:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
         sock = create_listen_socket(listen_ip, listen_port, use_reuseport)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         log(
