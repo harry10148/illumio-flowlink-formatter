@@ -1,8 +1,8 @@
 # FlowLink Forcepoint Syslog Formatter SOP
 
 - 文件位置: `/opt/flowlink/`
-- Repo 位置: `/mnt/d/OneDrive/RD/illumio_flowlink_/`
-- 最後更新: `2026-04-19`
+- Repo 位置: `/home/harry/rd/illumio-flowlink-formatter/`
+- 最後更新: `2026-05-07`
 - 適用對象: 系統管理員 / 運維人員
 - 核心功能: 接收 Forcepoint CEF Syslog，轉成 FlowLink 可接受的最小流量資料，再由 FlowLink 上傳到 SaaS / PCE
 
@@ -75,12 +75,12 @@ Formatter 目前會做以下處理：
 
 Repo 中主要檔案如下：
 
-- [syslog-formatter.py](/mnt/d/OneDrive/RD/illumio_flowlink_/syslog-formatter.py:1)
-- [syslog-formatter.ini](/mnt/d/OneDrive/RD/illumio_flowlink_/syslog-formatter.ini:1)
-- [config-syslog.yml](/mnt/d/OneDrive/RD/illumio_flowlink_/config-syslog.yml:1)
-- [systemd/syslog-formatter.service](/mnt/d/OneDrive/RD/illumio_flowlink_/systemd/syslog-formatter.service:1)
-- [systemd/flowlink-healthcheck.service](/mnt/d/OneDrive/RD/illumio_flowlink_/systemd/flowlink-healthcheck.service:1)
-- [systemd/flowlink-healthcheck.timer](/mnt/d/OneDrive/RD/illumio_flowlink_/systemd/flowlink-healthcheck.timer:1)
+- [syslog-formatter.py](syslog-formatter.py)
+- [syslog-formatter.ini](syslog-formatter.ini)
+- [config-syslog.yml](config-syslog.yml)
+- [systemd/syslog-formatter.service](systemd/syslog-formatter.service)
+- [systemd/flowlink-healthcheck.service](systemd/flowlink-healthcheck.service)
+- [systemd/flowlink-healthcheck.timer](systemd/flowlink-healthcheck.timer)
 
 ## 6. 執行方式
 
@@ -132,7 +132,7 @@ restart_wait_seconds = 5
 - `listen_port`: 接收 Forcepoint syslog 的 UDP port
 - `target_ip`: 轉送到 FlowLink 的目標 IP
 - `target_port`: 轉送到 FlowLink 的目標 port
-- `workers`: relay worker 數量
+- `workers`: relay worker 數量；若作業系統不支援 `SO_REUSEPORT`，會自動退回單一 worker 並在啟動 log 印出警告
 
 ### `[healthcheck]`
 
@@ -165,6 +165,15 @@ restart_wait_seconds = 5
   - 每 30 分鐘執行一次 `flowlink-healthcheck.service`
 
 ### 8.2 安裝步驟
+
+部署前，先把 `config-syslog.yml` 中的 `api_key: REPLACE_ME` 換成實際的 API key（FlowLink 不會做 shell 替換，必須是字面值）。可手動編輯，或用：
+
+```bash
+API_KEY="$(cat /opt/flowlink/api_info)"
+sed -i "s|^api_key:.*|api_key: ${API_KEY}|" /opt/flowlink/config-syslog.yml
+```
+
+接著安裝 systemd unit：
 
 ```bash
 cp /opt/flowlink/systemd/*.service /etc/systemd/system/
@@ -234,6 +243,8 @@ systemctl restart syslog-formatter.service
 systemctl status syslog-formatter.service
 ```
 
+worker 子進程已正確響應 SIGTERM，`systemctl restart` / `stop` 應在數秒內完成；若觀察到 systemd 走 `SIGKILL` 強制終止，代表 worker 實際卡在處理上而非 signal 處理錯誤。
+
 ### 10.3 查看 timer 與巡檢狀態
 
 ```bash
@@ -276,6 +287,10 @@ ls -l /var/log/flowlink_crash_backups
 ### 12.3 FlowLink 本身仍需外部監控
 
 FlowLink 官方設計並非高可用，relay 雖已有 `Restart=always`，但 FlowLink 本體與整體資料鏈路仍建議保留定期 healthcheck。
+
+### 12.4 `api_key` 必須是字面值
+
+`config-syslog.yml` 中的 `api_key` 不會被 FlowLink 做 shell 替換，必須是真正的 key 字串。repo 預設值為 `REPLACE_ME`，部署時務必依 §8.2 手動換成 `/opt/flowlink/api_info` 內容，否則 FlowLink 對 PCE / SaaS 的認證會直接失敗。
 
 ## 13. 驗證紀錄
 
