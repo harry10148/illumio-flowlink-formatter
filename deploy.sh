@@ -94,12 +94,11 @@ if ! id -u flowlink >/dev/null 2>&1; then
     run useradd --system --no-create-home --shell /usr/sbin/nologin flowlink
 fi
 
-# Back up site-edited configs before overwriting (config-syslog.yml always
-# differs after api_key injection, so a backup is created on every re-deploy).
+# Back up site-edited configs before overwriting.
 for f in config-syslog.yml syslog-formatter.ini; do
     if [[ -f "${DEST}/${f}" ]] && ! cmp -s "${REPO_DIR}/${f}" "${DEST}/${f}"; then
         run cp -p "${DEST}/${f}" "${DEST}/${f}.bak.${ts}"
-        run chmod 600 "${DEST}/${f}.bak.${ts}"   # backups may contain api_key
+        run chmod 600 "${DEST}/${f}.bak.${ts}"   # old backups may contain a literal api_key
         log "Existing ${f} differs from repo; backed up to ${f}.bak.${ts}"
     fi
 done
@@ -107,18 +106,10 @@ done
 run cp "${REPO_DIR}/syslog-formatter.py" "${REPO_DIR}/syslog-formatter.ini" "${REPO_DIR}/config-syslog.yml" "${DEST}/"
 run cp "${REPO_DIR}"/systemd/*.service "${REPO_DIR}"/systemd/*.timer "${DEST}/systemd/"
 
-# --- 3. Inject api_key (fail-fast: REPLACE_ME must not survive) -------------
-log "Injecting api_key from ${API_INFO} ..."
-if (( ! DRY_RUN )); then
-    API_KEY="$(tr -d '[:space:]' < "${API_INFO}")"
-    [[ -n "${API_KEY}" ]] || fail "API key in ${API_INFO} is empty after trimming whitespace."
-    sed -i "s|^api_key:.*|api_key: ${API_KEY//&/\\&}|" "${DEST}/config-syslog.yml"
-    if grep -q '^api_key:.*REPLACE_ME' "${DEST}/config-syslog.yml"; then
-        fail "api_key injection failed; REPLACE_ME still present in ${DEST}/config-syslog.yml."
-    fi
-    # Contains the real PCE API key from here on; FlowLink runs as root.
-    chmod 600 "${DEST}/config-syslog.yml"
-fi
+# --- 3. API credentials ------------------------------------------------------
+# config-syslog.yml ships with `api_key: /opt/flowlink/api_info`; FlowLink
+# opens that path itself (file format: "api_<key_id> <secret>"). No injection
+# needed — preflight already verified the file exists and chmod'ed it 600.
 
 # --- 3.5 Switch FlowLink off a legacy config (e.g. config-netflow.yml) ------
 # A FlowLink that is RUNNING but not bound to UDP 5514 (target_port in

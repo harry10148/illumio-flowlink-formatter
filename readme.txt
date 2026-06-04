@@ -174,25 +174,18 @@ healthcheck 另外會檢查 UDP port 綁定（relay 用 `[relay] listen_port`、
 
 ### 8.2 安裝步驟
 
-建議直接使用一鍵部署腳本（含前置檢查、api_key 注入、systemd 安裝與部署後驗證）：
+建議直接使用一鍵部署腳本（含前置檢查、舊版替換、systemd 安裝與部署後驗證）：
 
 ```bash
 sudo /home/harry/rd/illumio-flowlink-formatter/deploy.sh            # 部署 + 驗證
 sudo /home/harry/rd/illumio-flowlink-formatter/deploy.sh --dry-run  # 只列出動作
 ```
 
-前置條件：`/opt/flowlink/api_info` 必須已放入實際 API key，且 FlowLink 本體（`illumio-flowlink-ctl`）已安裝；缺一即硬停報錯。
+前置條件：`/opt/flowlink/api_info` 必須已放入實際 API 認證（格式：`api_<key_id> <secret>`，空白分隔一行），且 FlowLink 本體（`illumio-flowlink-ctl`）已安裝；缺一即硬停報錯。
 
-deploy.sh 會將 `api_info` 與注入 api_key 後的 `config-syslog.yml`（含 `.bak.*` 備份檔）權限收緊為 600，避免本機非特權帳號讀到 PCE API key。
+API 認證機制（重要）：`config-syslog.yml` 的 `api_key` 欄位是**認證檔路徑**（repo 已預設 `/opt/flowlink/api_info`），FlowLink 啟動時自己開檔讀取，不需要任何注入步驟。deploy.sh 會將 `api_info` 與 `config-syslog.yml` 的 `.bak.*` 備份檔權限收緊為 600，避免本機非特權帳號讀到 PCE API 認證。
 
-以下為等效的手動步驟。部署前，先把 `config-syslog.yml` 中的 `api_key: REPLACE_ME` 換成實際的 API key（FlowLink 不會做 shell 替換，必須是字面值）。可手動編輯，或用：
-
-```bash
-API_KEY="$(cat /opt/flowlink/api_info)"
-sed -i "s|^api_key:.*|api_key: ${API_KEY}|" /opt/flowlink/config-syslog.yml
-```
-
-接著安裝 systemd unit：
+以下為等效的手動步驟。安裝 systemd unit：
 
 ```bash
 cp /opt/flowlink/systemd/*.service /etc/systemd/system/
@@ -376,9 +369,9 @@ relay 監聽 `0.0.0.0:514` 且不驗證來源，任何能路由到本機的設�
 PCE Illumination。建議用主機防火牆（firewalld / nftables）只放行 Forcepoint
 來源 IP 的 UDP 514。UDP 本身可偽造來源，此措施屬縱深防禦。
 
-### 12.6 `api_key` 必須是字面值
+### 12.6 `api_key` 是認證檔路徑，不是字面 key
 
-`config-syslog.yml` 中的 `api_key` 不會被 FlowLink 做 shell 替換，必須是真正的 key 字串。repo 預設值為 `REPLACE_ME`，部署時務必依 §8.2 手動換成 `/opt/flowlink/api_info` 內容，否則 FlowLink 對 PCE / SaaS 的認證會直接失敗。
+`config-syslog.yml` 中的 `api_key` 欄位語意是「認證檔路徑」：FlowLink 啟動時會把該值當成檔案路徑開啟，讀取 `api_<key_id> <secret>` 兩個 token（相對路徑以啟動時的 CWD 解析，務必寫絕對路徑）。若誤填字面 key 字串，FlowLink 會嘗試開啟一個名為該 key 的檔案而啟動失敗（`Error: open .../api_xxx: no such file or directory`）。此語意已於 2026-06-04 在 ilo-flow 實機驗證（舊版 `config-netflow.yml` 的 `$cat /opt/flowlink/api_info` 寫法能動，正是因為 `$cat` 被展開成空字串後剩下路徑）。repo 預設值 `/opt/flowlink/api_info` 即正確設定，不需修改。
 
 ## 13. 驗證紀錄
 
@@ -392,7 +385,7 @@ PCE Illumination。建議用主機防火牆（firewalld / nftables）只放行 F
 - healthcheck port 盲區與 exit code 測試（stub flowlink-ctl / systemctl）
 - `process_packet` 單核效能基準：~35k pkts/s（2KB 真實樣本；4 workers 約
   140k pkts/s，遠高於 Forcepoint 實際事件量）
-- deploy.sh：dry-run 全流程、api_key 注入、重跑冪等備份
+- deploy.sh：dry-run 全流程、重跑冪等備份、舊版替換（實機驗證見 §8.4 / §12.6）
 
 未在此 repo 內完成的項目：
 

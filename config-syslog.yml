@@ -1,6 +1,7 @@
 pce_addr: pce.lab.local:8443
-# Replace REPLACE_ME with the contents of /opt/flowlink/api_info before deploy.
-api_key: REPLACE_ME
+# Path to the credentials file ("api_<key_id> <secret>", space separated).
+# FlowLink opens this path itself; do NOT put the literal key here.
+api_key: /opt/flowlink/api_info
 data_directory: /opt/flowlink/data
 aggregation_minutes: 10
 consumers:
