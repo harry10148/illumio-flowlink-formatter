@@ -183,6 +183,8 @@ sudo /home/harry/rd/illumio-flowlink-formatter/deploy.sh --dry-run  # 只列出�
 
 前置條件：`/opt/flowlink/api_info` 必須已放入實際 API key，且 FlowLink 本體（`illumio-flowlink-ctl`）已安裝；缺一即硬停報錯。
 
+deploy.sh 會將 `api_info` 與注入 api_key 後的 `config-syslog.yml`（含 `.bak.*` 備份檔）權限收緊為 600，避免本機非特權帳號讀到 PCE API key。
+
 以下為等效的手動步驟。部署前，先把 `config-syslog.yml` 中的 `api_key: REPLACE_ME` 換成實際的 API key（FlowLink 不會做 shell 替換，必須是字面值）。可手動編輯，或用：
 
 ```bash
@@ -211,40 +213,41 @@ systemctl list-timers | grep flowlink-healthcheck
 ### 8.4 從舊版部署升級（syslog-relay + monitor_services.sh）
 
 舊版環境的特徵：service 名稱是 `syslog-relay`、cron 跑 `monitor_services.sh`、
-FlowLink 設定檔可能是 `config-netflow.yml`。升級步驟如下（建議在低流量時段執行，
-切換期間 UDP 514 會有數秒中斷）：
+FlowLink 設定檔可能是 `config-netflow.yml`。
+
+**deploy.sh 已自動處理以下替換步驟**（重跑冪等，乾淨主機上為 no-op）：
+
+- 停用並移除舊 `syslog-relay.service`（unit 檔一併刪除）
+- 將 `monitor_services.sh` 改名為 `.disabled.<時間戳>`
+- 清除 root crontab 中的 legacy flowlink 工作（30 分巡檢、03:00 truncate、
+  03:00 備份清理、週日 04:00 monitor log 輪替）。原 crontab 先備份到
+  `/var/log/flowlink_crash_backups/crontab.root.bak.<時間戳>`；
+  其他非 flowlink 的 cron 工作會保留
+- FlowLink 若運行中但 UDP 5514 未綁定（代表還在用舊設定如
+  `config-netflow.yml`），自動以 `config-syslog.yml` 重啟
+
+注意：若現場仍需要 netflow consumer，請先把它合併進 `config-syslog.yml`
+再跑 deploy.sh，否則 netflow 收集會在 FlowLink 重啟後中斷
+（`config-netflow.yml` 檔案本身不會被刪除）。建議在低流量時段執行，
+切換期間 UDP 514 會有數秒中斷。
+
+升級流程簡化為：
 
 ```bash
-# 0. 盤點現況
+# 0. 盤點現況（建議仍先人工確認一次）
 systemctl status syslog-relay
-crontab -l | grep -E 'monitor_services|truncate'
+crontab -l
 ps aux | grep -i flowlink          # 確認 FlowLink 目前用哪個 config 在跑
 /usr/local/bin/illumio-flowlink-ctl status
 
-# 1. 移除舊 cron（monitor_services.sh 巡檢與 03:00 truncate）
-crontab -e
-
-# 2. 停用舊 relay（舊版佔著 UDP 514，deploy.sh preflight 會擋）
-systemctl disable --now syslog-relay
-mv /opt/flowlink/monitor_services.sh /opt/flowlink/monitor_services.sh.disabled
-
-# 3. 確認 API key 已就位
+# 1. 確認 API key 已就位
 test -s /opt/flowlink/api_info && echo OK
 
-# 4. 部署新版（先 dry-run 看一遍動作）
+# 2. 部署新版（先 dry-run 看一遍動作，含上述自動替換步驟）
 cd <repo 目錄>
 sudo ./deploy.sh --dry-run
 sudo ./deploy.sh
-
-# 5. 清掉舊 unit 檔（確認新版運作正常後）
-rm -f /etc/systemd/system/syslog-relay.service
-systemctl daemon-reload
 ```
-
-注意：若步驟 0 發現 FlowLink 正以 `config-netflow.yml` 執行，請先確認現場是否
-仍需要 netflow consumer。新版 healthcheck / flowlink-start 重啟 FlowLink 時一律
-使用 `config-syslog.yml`；若兩種 consumer 都要，請把 netflow consumer 合併進
-`config-syslog.yml` 再部署。
 
 ## 9. 日常健康檢查
 

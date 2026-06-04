@@ -19,6 +19,7 @@ SYSCTL_FILE=/etc/sysctl.d/99-flowlink-udp.conf
 FLOWLINK_CTL=/usr/local/bin/illumio-flowlink-ctl   # must match flowlink_cmd in syslog-formatter.ini
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+ts="$(date +%Y%m%d_%H%M%S)"
 
 log()  { echo "[deploy] $*"; }
 fail() { echo "[deploy] ERROR: $*" >&2; exit 1; }
@@ -32,10 +33,54 @@ fi
 command -v python3 >/dev/null || fail "python3 not found."
 [[ -x "${FLOWLINK_CTL}" ]] || fail "${FLOWLINK_CTL} not found; install FlowLink first (not covered by this script)."
 [[ -s "${API_INFO}" ]] || fail "${API_INFO} missing or empty; put the PCE API key there first (readme.txt §8.2)."
+run chmod 600 "${API_INFO}"
+
+# --- 1.5 Legacy replacement (readme.txt §8.4) -------------------------------
+# Old deployments run syslog-relay.service + monitor_services.sh cron jobs.
+# Every step below is a no-op on a clean host.
+if [[ -f /etc/systemd/system/syslog-relay.service ]]; then
+    log "Legacy syslog-relay.service found; disabling and removing..."
+    run systemctl disable --now syslog-relay.service
+    run rm -f /etc/systemd/system/syslog-relay.service
+    run systemctl daemon-reload
+fi
+
+if [[ -f "${DEST}/monitor_services.sh" ]]; then
+    log "Legacy monitor_services.sh found; disabling..."
+    run mv "${DEST}/monitor_services.sh" "${DEST}/monitor_services.sh.disabled.${ts}"
+fi
+
+# Root crontab: drop legacy flowlink jobs (30-min monitor loop, 03:00
+# truncate + crash-backup cleanup, weekly monitor-log rotation). The original
+# crontab is backed up to BACKUP_DIR first; non-flowlink jobs are kept.
+LEGACY_CRON_RE='monitor_services\.sh|flowlink_crash_backups|/opt/flowlink/data/flowlink\.log|flowlink_monitor\.log'
+if crontab -l 2>/dev/null | grep -Eq "${LEGACY_CRON_RE}"; then
+    log "Legacy flowlink cron jobs found in root crontab; removing..."
+    if (( DRY_RUN )); then
+        echo "[dry-run] back up root crontab to ${BACKUP_DIR}/crontab.root.bak.${ts}, then strip legacy entries"
+    else
+        mkdir -p "${BACKUP_DIR}"
+        crontab -l > "${BACKUP_DIR}/crontab.root.bak.${ts}"
+        remaining="$(crontab -l | grep -Ev "${LEGACY_CRON_RE}" || true)"
+        if echo "${remaining}" | grep -Eq '^[^#[:space:]]'; then
+            # Other active jobs exist: keep them (stale comments may remain).
+            echo "${remaining}" | crontab -
+            log "Kept non-flowlink cron jobs; backup: crontab.root.bak.${ts}"
+        else
+            crontab -r
+            log "No other active cron jobs; root crontab cleared. Backup: crontab.root.bak.${ts}"
+        fi
+    fi
+fi
 
 # UDP 514 must be free, unless it is our own relay from a previous deploy.
 if ss -uln 'sport = :514' | grep -q ':514' && ! systemctl is-active --quiet syslog-formatter.service; then
-    fail "UDP 514 already in use by another process: $(ss -ulpn 'sport = :514' | tail -n +2)"
+    if (( DRY_RUN )) && systemctl is-active --quiet syslog-relay.service; then
+        # Real run would have stopped the legacy relay above already.
+        log "NOTE: UDP 514 is held by legacy syslog-relay (would be stopped by the step above)."
+    else
+        fail "UDP 514 already in use by another process: $(ss -ulpn 'sport = :514' | tail -n +2)"
+    fi
 fi
 log "Preflight OK."
 
@@ -51,10 +96,10 @@ fi
 
 # Back up site-edited configs before overwriting (config-syslog.yml always
 # differs after api_key injection, so a backup is created on every re-deploy).
-ts="$(date +%Y%m%d_%H%M%S)"
 for f in config-syslog.yml syslog-formatter.ini; do
     if [[ -f "${DEST}/${f}" ]] && ! cmp -s "${REPO_DIR}/${f}" "${DEST}/${f}"; then
         run cp -p "${DEST}/${f}" "${DEST}/${f}.bak.${ts}"
+        run chmod 600 "${DEST}/${f}.bak.${ts}"   # backups may contain api_key
         log "Existing ${f} differs from repo; backed up to ${f}.bak.${ts}"
     fi
 done
@@ -71,6 +116,24 @@ if (( ! DRY_RUN )); then
     if grep -q '^api_key:.*REPLACE_ME' "${DEST}/config-syslog.yml"; then
         fail "api_key injection failed; REPLACE_ME still present in ${DEST}/config-syslog.yml."
     fi
+    # Contains the real PCE API key from here on; FlowLink runs as root.
+    chmod 600 "${DEST}/config-syslog.yml"
+fi
+
+# --- 3.5 Switch FlowLink off a legacy config (e.g. config-netflow.yml) ------
+# A FlowLink that is RUNNING but not bound to UDP 5514 (target_port in
+# syslog-formatter.ini) is consuming with a legacy config; restart it with
+# config-syslog.yml so the verify step passes. NOTE: if a netflow consumer is
+# still required on this host, merge it into config-syslog.yml first (§8.4).
+if (( DRY_RUN )); then
+    echo "[dry-run] restart FlowLink with ${DEST}/config-syslog.yml if running without UDP 5514 bound"
+elif "${FLOWLINK_CTL}" status 2>/dev/null | grep -q 'FlowLink: RUNNING' && \
+     ! ss -uln 'sport = :5514' | grep -q ':5514'; then
+    log "FlowLink is running but UDP 5514 is not bound (legacy config?); restarting with config-syslog.yml ..."
+    "${FLOWLINK_CTL}" stop || true
+    sleep 2
+    "${FLOWLINK_CTL}" start --config "${DEST}/config-syslog.yml" \
+        || fail "FlowLink failed to start with config-syslog.yml."
 fi
 
 # --- 4. UDP buffer sysctl (persistent; see system-setting.txt) --------------
