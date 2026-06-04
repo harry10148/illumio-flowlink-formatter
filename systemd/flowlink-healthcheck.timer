@@ -2,7 +2,7 @@
 Description=Run FlowLink health checks every 30 minutes
 
 [Timer]
-OnBootSec=5m
+OnBootSec=1m
 OnUnitActiveSec=30m
 Unit=flowlink-healthcheck.service
 Persistent=true

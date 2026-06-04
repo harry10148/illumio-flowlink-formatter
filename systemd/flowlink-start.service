@@ -1,0 +1,15 @@
+[Unit]
+Description=Start FlowLink at boot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/flowlink
+# "-" prefix: ignore the error when FlowLink is already running; the
+# healthcheck timer re-verifies the data path within minutes anyway.
+ExecStart=-/usr/local/bin/illumio-flowlink-ctl start --config /opt/flowlink/config-syslog.yml
+
+[Install]
+WantedBy=multi-user.target

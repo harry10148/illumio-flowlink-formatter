@@ -1,0 +1,13 @@
+# Installed to /etc/logrotate.d/flowlink by deploy.sh.
+# copytruncate is required: FlowLink keeps the log fd open and has no
+# reopen signal.
+/opt/flowlink/data/flowlink.log {
+    daily
+    rotate 7
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

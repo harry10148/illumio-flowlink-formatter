@@ -24,7 +24,8 @@ DEFAULT_WORKER_COUNT = multiprocessing.cpu_count()
 RECV_BUFFER_SIZE = 4 * 1024 * 1024
 MAX_DATAGRAM_SIZE = 65535
 SUPERVISOR_POLL_SECONDS = 2
-TIMESTAMP_PATTERN = re.compile(r"(start|end|rt|art)=(\d{10})\d{3}")
+STATS_INTERVAL_SECONDS = 60
+TIMESTAMP_PATTERN = re.compile(r"\b(start|end|rt|art)=(\d{10})\d{3}")
 REQUIRED_FLOW_FIELDS = ("start", "src", "dst", "dpt")
 FIELD_PATTERNS = {
     field: re.compile(rf"(^|\s){field}=([^\s]+)")
@@ -36,6 +37,7 @@ DEFAULT_FLOWLINK_CONFIG = "/opt/flowlink/config-syslog.yml"
 DEFAULT_FLOWLINK_LOG = "/opt/flowlink/data/flowlink.log"
 DEFAULT_RELAY_SERVICE = "syslog-formatter"
 DEFAULT_BACKUP_DIR = "/var/log/flowlink_crash_backups"
+DEFAULT_BACKUP_RETAIN = 20
 DEFAULT_RESTART_WAIT_SECONDS = 5
 
 CONFIG_SCHEMA = {
@@ -52,6 +54,7 @@ CONFIG_SCHEMA = {
         "flowlink_log": str,
         "relay_service": str,
         "backup_dir": str,
+        "backup_retain": int,
         "restart_wait_seconds": int,
     },
 }
@@ -193,14 +196,30 @@ def process_packet(data):
 
 
 def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
+    relayed_count = 0
     error_count = 0
+    truncated_count = 0
+    window_start = time.monotonic()
     sock = None
     sender = None
+
+    def flush_stats(now):
+        nonlocal relayed_count, error_count, truncated_count, window_start
+        log(
+            f"Worker {os.getpid()} stats: relayed={relayed_count} "
+            f"errors={error_count} truncated={truncated_count} "
+            f"window={int(now - window_start)}s"
+        )
+        relayed_count = error_count = truncated_count = 0
+        window_start = now
 
     try:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
         sock = create_listen_socket(listen_ip, listen_port, use_reuseport)
+        # Timeout doubles as the idle heartbeat: stats are emitted even
+        # when no traffic arrives, proving the worker is alive.
+        sock.settimeout(STATS_INTERVAL_SECONDS)
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         log(
             f"Worker {os.getpid()} listening on UDP {listen_ip}:{listen_port} -> "
@@ -208,27 +227,41 @@ def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
         )
 
         while True:
+            now = time.monotonic()
+            if now - window_start >= STATS_INTERVAL_SECONDS:
+                flush_stats(now)
+
             try:
                 data, _, flags, _ = sock.recvmsg(MAX_DATAGRAM_SIZE)
                 if flags & getattr(socket, "MSG_TRUNC", 0):
-                    error_count += 1
-                    log(
-                        f"Worker {os.getpid()} dropped a truncated UDP datagram.",
-                        level="ERROR",
-                    )
+                    truncated_count += 1
+                    if truncated_count == 1:
+                        log(
+                            f"Worker {os.getpid()} dropped a truncated UDP "
+                            "datagram (further ones this window are counted "
+                            "in stats).",
+                            level="ERROR",
+                        )
                     continue
 
                 clean_data = process_packet(data)
                 sender.sendto(clean_data, (target_ip, target_port))
+                relayed_count += 1
+            except socket.timeout:
+                continue
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
+                # Log only the first error per stats window to avoid
+                # journald flooding under malformed traffic; totals are
+                # reported in the periodic stats line.
                 error_count += 1
-                log(
-                    f"Worker {os.getpid()} packet processing failed "
-                    f"(count={error_count}): {exc}",
-                    level="ERROR",
-                )
+                if error_count == 1:
+                    log(
+                        f"Worker {os.getpid()} packet processing failed: {exc} "
+                        "(further errors this window are counted in stats)",
+                        level="ERROR",
+                    )
     except KeyboardInterrupt:
         return
     except Exception as exc:
@@ -376,8 +409,45 @@ def backup_journal(service_name, backup_dir):
     return destination
 
 
+def udp_port_bound(port):
+    """Return True if any local socket is bound to the given UDP port."""
+    needle = f":{port:04X}"
+    for proc_path in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            with open(proc_path, encoding="ascii") as handle:
+                next(handle, None)  # skip header
+                for line in handle:
+                    fields = line.split()
+                    if len(fields) > 1 and fields[1].endswith(needle):
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def prune_backups(backup_dir, retain):
+    """Keep only the newest `retain` files in backup_dir; return removed count."""
+    if retain <= 0 or not backup_dir.exists():
+        return 0
+
+    entries = sorted(
+        (path for path in backup_dir.iterdir() if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    removed = 0
+    for stale in entries[retain:]:
+        try:
+            stale.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 def healthcheck(args):
     backup_dir = Path(args.backup_dir)
+    critical = False
     print(f"=== Starting Health Check: {time.strftime('%Y%m%d_%H%M%S')} ===")
     if args.config_path:
         print(f"Config: {args.config_path}")
@@ -388,10 +458,12 @@ def healthcheck(args):
     flowlink_state = parse_flowlink_status(flowlink_code, flowlink_output)
 
     if flowlink_error is not None or flowlink_state in {"command_error", "unknown"}:
+        critical = True
         print("[CRITICAL] FlowLink status check failed!")
         detail = flowlink_error or flowlink_output or "Unknown status response."
         print(f"   -> Detail: {detail}")
     elif flowlink_state == "stopped":
+        critical = True
         print("[CRITICAL] FlowLink is DOWN!")
 
         backup_path = backup_file(
@@ -425,11 +497,22 @@ def healthcheck(args):
     else:
         print("[OK] FlowLink is running.")
 
+    # Port check catches the "process up but consumer dead" blind spot.
+    if udp_port_bound(args.flowlink_port):
+        print(f"[OK] UDP {args.flowlink_port} is bound (FlowLink consumer).")
+    else:
+        critical = True
+        print(
+            f"[CRITICAL] UDP {args.flowlink_port} is NOT bound; "
+            "FlowLink is not consuming flows!"
+        )
+
     relay_status = subprocess.run(
         ["systemctl", "is-active", "--quiet", args.relay_service],
         check=False,
     )
     if relay_status.returncode != 0:
+        critical = True
         print("[CRITICAL] Syslog Formatter is DOWN!")
         journal_path = backup_journal(args.relay_service, backup_dir)
         print(f"   -> Journal logs backed up to: {journal_path}")
@@ -437,6 +520,7 @@ def healthcheck(args):
         print("   -> Attempting restart...")
         subprocess.run(["systemctl", "reset-failed", args.relay_service], check=False)
         subprocess.run(["systemctl", "restart", args.relay_service], check=False)
+        time.sleep(1)
 
         verify_relay = subprocess.run(
             ["systemctl", "is-active", "--quiet", args.relay_service],
@@ -449,8 +533,25 @@ def healthcheck(args):
     else:
         print("[OK] Syslog Formatter is running.")
 
+    # Port check catches a worker bind-crash-loop that systemd reports
+    # as "active" (the supervisor process itself never dies).
+    if udp_port_bound(args.relay_port):
+        print(f"[OK] UDP {args.relay_port} is bound (relay listener).")
+    else:
+        critical = True
+        print(
+            f"[CRITICAL] UDP {args.relay_port} is NOT bound; "
+            "relay workers are not listening!"
+        )
+
+    removed = prune_backups(backup_dir, args.backup_retain)
+    if removed:
+        print(f"Pruned {removed} old backup file(s) from {backup_dir}.")
+
     print("=== Check Finished ===")
     print("")
+    if critical:
+        sys.exit(1)
 
 
 def build_parser(config_defaults):
@@ -515,6 +616,24 @@ def build_parser(config_defaults):
     health_parser.add_argument(
         "--backup-dir",
         default=config_defaults.get("backup_dir", DEFAULT_BACKUP_DIR),
+    )
+    health_parser.add_argument(
+        "--backup-retain",
+        type=int,
+        default=config_defaults.get("backup_retain", DEFAULT_BACKUP_RETAIN),
+        help="Keep only the newest N files in --backup-dir (0 disables pruning).",
+    )
+    health_parser.add_argument(
+        "--relay-port",
+        type=int,
+        default=config_defaults.get("listen_port", DEFAULT_LISTEN_PORT),
+        help="UDP port the relay must have bound.",
+    )
+    health_parser.add_argument(
+        "--flowlink-port",
+        type=int,
+        default=config_defaults.get("target_port", DEFAULT_TARGET_PORT),
+        help="UDP port FlowLink must have bound.",
     )
     health_parser.add_argument(
         "--restart-wait-seconds",

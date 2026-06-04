@@ -2,6 +2,9 @@
 Description=FlowLink and Syslog Formatter Health Check
 After=network-online.target syslog-formatter.service
 Wants=network-online.target
+# healthcheck exits 1 on any [CRITICAL]; wire this to your alerting
+# transport (e.g. a oneshot unit that sends SMTP / LINE Notify):
+# OnFailure=flowlink-alert.service
 
 [Service]
 Type=oneshot
