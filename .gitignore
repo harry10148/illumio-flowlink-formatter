@@ -1,3 +1,4 @@
 logsample/
 .claude/
 __pycache__/
+dist/

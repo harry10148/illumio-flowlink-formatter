@@ -3,7 +3,7 @@
 日期：2026-07-05
 狀態：**已由 2026-08-11 的實作取代（歷史紀錄）**
 
-> 2026-08-11 更新：ilo-flow 已升級 FlowLink 2.0.0-7，站點決定不保留 legacy
+> 2026-08-11 更新：lab-flowlink 已升級 FlowLink 2.0.0-7，站點決定不保留 legacy
 > 支援，因此本設計的「雙模式 monitor」未實作。實際做法更簡單：
 > `flowlink-start.service`、`flowlink-healthcheck.service` / `.timer`、
 > 自建 logrotate 規則全部刪除，`syslog-formatter.py healthcheck` 改寫成

@@ -3,7 +3,7 @@
 > FlowLink 2.0.0 起自己就是 Linux service，我們過去為了補「FlowLink 不是服務」而自建的
 > systemd unit、logrotate 規則與 cron 巡檢全部要退場。
 >
-> 依 2026-08-11 在 `ilo-flow` 實機走完一遍的結果整理，每一步都附驗證點。
+> 依 2026-08-11 在 `lab-flowlink` 實機走完一遍的結果整理，每一步都附驗證點。
 
 | | |
 |---|---|
@@ -11,8 +11,6 @@
 | 驗證環境 | Rocky Linux 9.5 |
 | 預估停機 | 5–15 分鐘 |
 | 權限 | root |
-
-網頁版（排版較好讀）：https://claude.ai/code/artifact/eb9bb641-7a00-4d27-bd46-d4f00787fe18
 
 ---
 
@@ -241,7 +239,7 @@ python3 -c '
 import socket, time
 now = int(time.time() * 1000)
 msg = ("<134>CEF:0|Forcepoint|Security|8.5.4|227|Transaction permitted|Low| "
-       f"start={now} src=192.168.99.35 dst=203.0.113.10 dpt=443 "
+       f"start={now} src=192.0.2.35 dst=203.0.113.10 dpt=443 "
        "suser=OU\\=測試中文欄位/00764675")
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 for _ in range(10): s.sendto(msg.encode(), ("127.0.0.1", 514))
@@ -327,7 +325,7 @@ systemctl enable --now syslog-formatter.service flowlink-healthcheck.timer
 
 ## 實機踩到的坑
 
-都是 2026-08-11 在 `ilo-flow` 真的發生過、而且花了時間才找出來的。
+都是 2026-08-11 在 `lab-flowlink` 真的發生過、而且花了時間才找出來的。
 
 ### 升級會清掉 syslog consumer，但 relay 什麼都不會說
 

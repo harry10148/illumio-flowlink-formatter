@@ -1,7 +1,7 @@
 # FlowLink Forcepoint Syslog Formatter SOP
 
 - 文件位置: `/opt/flowlink/`
-- Repo 位置: `/home/harry/rd/illumio-flowlink-formatter/`
+- Repo: `illumio-flowlink-formatter`
 - 最後更新: `2026-08-11`
 - 適用對象: 系統管理員 / 運維人員
 - 核心功能: 接收 Forcepoint CEF Syslog，轉成 FlowLink 可接受的最小流量資料，再由 FlowLink 上傳到 SaaS / PCE
@@ -65,7 +65,7 @@ Formatter 目前會做以下處理：
 範例輸出：
 
 ```text
-<14>Aug 11 15:41:11 Forcepoint-Relay CEF:0|Forcepoint|Security|8.5.4|227|Transaction permitted|Low| start=1763015021 src=192.168.72.35 dst=162.247.243.29 dpt=443 proto=6
+<14>Aug 11 15:41:11 Forcepoint-Relay CEF:0|Forcepoint|Security|8.5.4|227|Transaction permitted|Low| start=1763015021 src=192.0.2.35 dst=203.0.113.29 dpt=443 proto=6
 ```
 
 這樣做的原因：
@@ -74,7 +74,7 @@ Formatter 目前會做以下處理：
 - 原始 CEF 中的 `suser`、`cs1`、`request` 等欄位可能包含中文與長字串
 - 這些欄位對目前的 FlowLink 用途沒有直接價值，卻會增加格式相容性與封包長度風險
 
-驗證結論（2026-08-11 於 ilo-flow 實機重測）：
+驗證結論（2026-08-11 於 lab-flowlink 實機重測）：
 
 - 原始事件是裸 `CEF:` 記錄，沒有 syslog header，因此補 header 是必要的
 - 原始事件的 `start` / `end` / `rt` / `art` 確實是 13 位毫秒時間戳
@@ -122,7 +122,7 @@ Repo 中主要檔案如下：
 - [systemd/syslog-formatter.service](systemd/syslog-formatter.service)
 - [deploy.sh](deploy.sh)
 - [docs/flowlink-2.0.0-migration-runbook.md](docs/flowlink-2.0.0-migration-runbook.md)：
-  舊環境遷移到 2.0.0 的逐步程序（見 §7.4）
+  舊環境遷移到 2.0.0 的逐步程序（見 §7.5）
 - [docs/superpowers/specs/](docs/superpowers/specs/)：設計文件（歷史紀錄）
 
 ## 5. 執行方式
@@ -234,7 +234,33 @@ ss -ulnp | grep -E ':514|:5514'
 python3 /opt/flowlink/syslog-formatter.py --config /opt/flowlink/syslog-formatter.ini healthcheck
 ```
 
-### 7.4 從 FlowLink 1.x 部署升級到 2.0.0
+### 7.4 離線部署包（帶到客戶環境用）
+
+客戶環境常常沒有網路、沒有 git，用這個產生自足的 tarball：
+
+```bash
+./make-offline-bundle.sh            # 產到 ./dist/
+./make-offline-bundle.sh /tmp/out   # 產到指定目錄
+```
+
+產出 `flowlink-formatter-<日期>-<commit>.tar.gz` 與對應的 `.sha256`。檔名帶
+commit sha，現場回報時一眼就知道跑的是哪一版；工作區有未提交變更時會標記
+`-dirty` 並警告。
+
+包內含 relay、unit 模板、deploy.sh、consumer 片段、本 SOP、遷移 runbook，
+以及一份 `INSTALL.txt` 快速說明。到現場後：
+
+```bash
+tar xzf flowlink-formatter-<版本>.tar.gz
+cd flowlink-formatter-<版本>
+sudo ./deploy.sh --dry-run
+sudo ./deploy.sh
+```
+
+**包內不含 FlowLink RPM**（授權軟體，需自 Illumio Support Portal 取得），
+請另外一起帶。`docs/superpowers/` 的設計文件屬內部歷史紀錄，不會打包。
+
+### 7.5 從 FlowLink 1.x 部署升級到 2.0.0
 
 官方升級流程是 `rpm -e illumio-flowlink` 後重裝新版 RPM。升級後路徑全部改變，
 舊部署的殘留必須清掉：
@@ -252,7 +278,6 @@ python3 /opt/flowlink/syslog-formatter.py --config /opt/flowlink/syslog-formatte
 以及實機踩過的坑）另外寫成 runbook：
 
 - [docs/flowlink-2.0.0-migration-runbook.md](docs/flowlink-2.0.0-migration-runbook.md)
-- 網頁版：https://claude.ai/code/artifact/eb9bb641-7a00-4d27-bd46-d4f00787fe18
 
 要遷移舊主機請直接照 runbook 走，不要只看本節。以下是最容易出事的兩點摘要：
 
@@ -368,7 +393,7 @@ worker 子進程已正確響應 SIGTERM，`systemctl restart` / `stop` 應在數
 
 ### 11.2 升級 FlowLink 會清掉 syslog consumer
 
-見 §7.4。這是 2026-08-11 實際踩到的狀況：升級後 `config.yaml` 只剩 netflow
+見 §7.5。這是 2026-08-11 實際踩到的狀況：升級後 `config.yaml` 只剩 netflow
 consumer，UDP 5514 無人監聽，relay 照常運作但轉出的封包全部落空。
 
 ### 11.3 CEF 跳脫 pipe 為已知限制
@@ -399,7 +424,7 @@ api_key: $cat /etc/illumio-flowlink/api_info   # 指令（官方範例寫法）
 
 ## 12. 驗證紀錄
 
-### 12.1 2026-08-11（FlowLink 2.0.0-7 / Rocky Linux 9.5 / ilo-flow）
+### 12.1 2026-08-11（FlowLink 2.0.0-7 / Rocky Linux 9.5 / lab-flowlink）
 
 - 真實 Forcepoint CEF（含中文 `suser` / `cs1`）經 relay：`1497 bytes` → `169 bytes`，
   非 ASCII 位元組數 `0`

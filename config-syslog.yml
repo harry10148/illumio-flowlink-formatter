@@ -36,7 +36,7 @@ consumers:
 
 # --- Full example of the merged /etc/illumio-flowlink/config.yaml -----------
 #
-# pce_addr: pce.lab.local:8443
+# pce_addr: pce.example.com:8443
 # org_id: 1
 # api_key: /etc/illumio-flowlink/api_info
 # data_directory: /var/lib/illumio-flowlink/data
