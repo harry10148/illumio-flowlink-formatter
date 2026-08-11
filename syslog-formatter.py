@@ -5,7 +5,6 @@ import configparser
 import multiprocessing
 import os
 import re
-import shutil
 import signal
 import socket
 import subprocess
@@ -31,14 +30,16 @@ FIELD_PATTERNS = {
     field: re.compile(rf"(^|\s){field}=([^\s]+)")
     for field in REQUIRED_FLOW_FIELDS
 }
+# Forcepoint proxy transactions carry no protocol tag, but FlowLink's text
+# parser requires one (`protocol: proto` in the consumer config) and discards
+# any record whose value it cannot parse — "Discarding flow due to invalid
+# protocol". Proxy traffic is TCP, so the relay synthesises proto=6.
+DEFAULT_PROTOCOL_VALUE = "6"
 
-DEFAULT_FLOWLINK_CMD = "/usr/local/bin/illumio-flowlink-ctl"
-DEFAULT_FLOWLINK_CONFIG = "/opt/flowlink/config-syslog.yml"
-DEFAULT_FLOWLINK_LOG = "/opt/flowlink/data/flowlink.log"
+# Since FlowLink 2.0.0 the daemon is a Linux service owned by the RPM, so the
+# healthcheck only observes it — restarting is systemd's job, not ours.
+DEFAULT_FLOWLINK_SERVICE = "illumio-flowlink"
 DEFAULT_RELAY_SERVICE = "syslog-formatter"
-DEFAULT_BACKUP_DIR = "/var/log/flowlink_crash_backups"
-DEFAULT_BACKUP_RETAIN = 20
-DEFAULT_RESTART_WAIT_SECONDS = 5
 
 CONFIG_SCHEMA = {
     "relay": {
@@ -47,15 +48,11 @@ CONFIG_SCHEMA = {
         "target_ip": str,
         "target_port": int,
         "workers": int,
+        "protocol_value": str,
     },
     "healthcheck": {
-        "flowlink_cmd": str,
-        "flowlink_config": str,
-        "flowlink_log": str,
+        "flowlink_service": str,
         "relay_service": str,
-        "backup_dir": str,
-        "backup_retain": int,
-        "restart_wait_seconds": int,
     },
 }
 
@@ -170,7 +167,7 @@ def create_listen_socket(listen_ip, listen_port, use_reuseport):
     return sock
 
 
-def process_packet(data):
+def process_packet(data, protocol_value=DEFAULT_PROTOCOL_VALUE):
     text_data = data.decode("utf-8", "ignore")
     text_data = TIMESTAMP_PATTERN.sub(r"\1=\2", text_data)
     if text_data.startswith("CEF:"):
@@ -190,12 +187,16 @@ def process_packet(data):
             raise ValueError(f"Missing required field: {field}")
         selected_fields.append(f"{field}={match.group(2)}")
 
+    if protocol_value:
+        selected_fields.append(f"proto={protocol_value}")
+
     minimal_extension = " " + " ".join(selected_fields)
     minimal_cef = "|".join([*cef_parts[:7], minimal_extension])
     return f"{prefix}CEF:{minimal_cef}".encode("utf-8")
 
 
-def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
+def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport,
+               protocol_value=DEFAULT_PROTOCOL_VALUE):
     relayed_count = 0
     error_count = 0
     truncated_count = 0
@@ -244,7 +245,7 @@ def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
                         )
                     continue
 
-                clean_data = process_packet(data)
+                clean_data = process_packet(data, protocol_value)
                 sender.sendto(clean_data, (target_ip, target_port))
                 relayed_count += 1
             except socket.timeout:
@@ -274,10 +275,12 @@ def run_worker(listen_ip, listen_port, target_ip, target_port, use_reuseport):
             sock.close()
 
 
-def start_worker(slot, listen_ip, listen_port, target_ip, target_port, use_reuseport):
+def start_worker(slot, listen_ip, listen_port, target_ip, target_port, use_reuseport,
+                 protocol_value=DEFAULT_PROTOCOL_VALUE):
     process = multiprocessing.Process(
         target=run_worker,
-        args=(listen_ip, listen_port, target_ip, target_port, use_reuseport),
+        args=(listen_ip, listen_port, target_ip, target_port, use_reuseport,
+              protocol_value),
         name=f"syslog-formatter-{slot}",
     )
     process.start()
@@ -305,6 +308,10 @@ def start_server(args):
     print(f"Forward   : {args.target_ip}:{args.target_port}")
     if args.config_path:
         print(f"Config    : {args.config_path}")
+    if args.protocol_value:
+        print(f"Protocol  : proto={args.protocol_value} (synthesised)")
+    else:
+        print("Protocol  : not injected")
     print("Features  : Header fix + timestamp normalization + minimal flow projection")
     print("==================================================")
 
@@ -317,6 +324,7 @@ def start_server(args):
             args.target_ip,
             args.target_port,
             use_reuseport,
+            args.protocol_value,
         )
 
     try:
@@ -341,6 +349,7 @@ def start_server(args):
                     args.target_ip,
                     args.target_port,
                     use_reuseport,
+                    args.protocol_value,
                 )
 
             time.sleep(SUPERVISOR_POLL_SECONDS)
@@ -350,63 +359,6 @@ def start_server(args):
                 process.terminate()
         for process in processes.values():
             process.join(timeout=5)
-
-
-def run_command(command):
-    try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        return None, "", str(exc)
-
-    output = "\n".join(
-        part for part in (completed.stdout.strip(), completed.stderr.strip()) if part
-    )
-    return completed.returncode, output, None
-
-
-def parse_flowlink_status(return_code, output):
-    normalized = output.upper()
-
-    if return_code is None:
-        return "command_error"
-    if "NOT RUNNING" in normalized:
-        return "stopped"
-    if return_code != 0 and "RUNNING" not in normalized:
-        return "command_error"
-    if "RUNNING" in normalized:
-        return "running"
-    return "unknown"
-
-
-def backup_file(source_path, backup_dir, prefix, suffix):
-    source = Path(source_path)
-    if not source.exists():
-        return None
-
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    destination = backup_dir / f"{prefix}_{stamp}.{suffix}"
-    shutil.copy2(source, destination)
-    return destination
-
-
-def backup_journal(service_name, backup_dir):
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    destination = backup_dir / f"relay_crash_{stamp}.txt"
-    result = subprocess.run(
-        ["journalctl", "-u", service_name, "-n", "50", "--no-pager"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    destination.write_text(result.stdout + result.stderr, encoding="utf-8")
-    return destination
 
 
 def udp_port_bound(port):
@@ -425,79 +377,36 @@ def udp_port_bound(port):
     return False
 
 
-def prune_backups(backup_dir, retain):
-    """Keep only the newest `retain` files in backup_dir; return removed count."""
-    if retain <= 0 or not backup_dir.exists():
-        return 0
-
-    entries = sorted(
-        (path for path in backup_dir.iterdir() if path.is_file()),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
+def service_active(service_name):
+    """Return True if systemd reports the unit as active."""
+    result = subprocess.run(
+        ["systemctl", "is-active", "--quiet", service_name],
+        check=False,
     )
-    removed = 0
-    for stale in entries[retain:]:
-        try:
-            stale.unlink()
-            removed += 1
-        except OSError:
-            pass
-    return removed
+    return result.returncode == 0
 
 
 def healthcheck(args):
-    backup_dir = Path(args.backup_dir)
+    """Report on the data path; never repair it.
+
+    FlowLink and the relay are both systemd services now, so restarting is
+    systemd's job. What systemd cannot see is the "process is active but
+    nothing is bound" blind spot — a FlowLink running a config without our
+    consumer, or a relay whose workers die in a bind loop while the
+    supervisor stays up. That is what the port checks are for.
+    """
     critical = False
     print(f"=== Starting Health Check: {time.strftime('%Y%m%d_%H%M%S')} ===")
     if args.config_path:
         print(f"Config: {args.config_path}")
 
-    flowlink_code, flowlink_output, flowlink_error = run_command(
-        [args.flowlink_cmd, "status"]
-    )
-    flowlink_state = parse_flowlink_status(flowlink_code, flowlink_output)
-
-    if flowlink_error is not None or flowlink_state in {"command_error", "unknown"}:
-        critical = True
-        print("[CRITICAL] FlowLink status check failed!")
-        detail = flowlink_error or flowlink_output or "Unknown status response."
-        print(f"   -> Detail: {detail}")
-    elif flowlink_state == "stopped":
-        critical = True
-        print("[CRITICAL] FlowLink is DOWN!")
-
-        backup_path = backup_file(
-            args.flowlink_log,
-            backup_dir,
-            "flowlink_crash",
-            "log",
-        )
-        if backup_path is not None:
-            print(f"   -> Log backed up to: {backup_path}")
-
-        print("   -> Attempting restart...")
-        restart_code, restart_output, restart_error = run_command(
-            [args.flowlink_cmd, "start", "--config", args.flowlink_config]
-        )
-        if restart_error is not None:
-            print(f"   -> Restart command failed: {restart_error}")
-        elif restart_code != 0:
-            print(f"   -> Restart command failed: {restart_output}")
-
-        time.sleep(args.restart_wait_seconds)
-        verify_code, verify_output, verify_error = run_command(
-            [args.flowlink_cmd, "status"]
-        )
-        verify_state = parse_flowlink_status(verify_code, verify_output)
-        if verify_error is None and verify_state == "running":
-            print("   -> Restart SUCCESS.")
-        else:
-            detail = verify_error or verify_output or "Unknown status response."
-            print(f"   -> Restart FAILED. Detail: {detail}")
+    if service_active(args.flowlink_service):
+        print(f"[OK] FlowLink ({args.flowlink_service}) is running.")
     else:
-        print("[OK] FlowLink is running.")
+        critical = True
+        print(f"[CRITICAL] FlowLink ({args.flowlink_service}) is DOWN!")
+        print(f"   -> Inspect: systemctl status {args.flowlink_service}")
 
-    # Port check catches the "process up but consumer dead" blind spot.
     if udp_port_bound(args.flowlink_port):
         print(f"[OK] UDP {args.flowlink_port} is bound (FlowLink consumer).")
     else:
@@ -506,35 +415,15 @@ def healthcheck(args):
             f"[CRITICAL] UDP {args.flowlink_port} is NOT bound; "
             "FlowLink is not consuming flows!"
         )
+        print("   -> Check the consumer block in /etc/illumio-flowlink/config.yaml")
 
-    relay_status = subprocess.run(
-        ["systemctl", "is-active", "--quiet", args.relay_service],
-        check=False,
-    )
-    if relay_status.returncode != 0:
-        critical = True
-        print("[CRITICAL] Syslog Formatter is DOWN!")
-        journal_path = backup_journal(args.relay_service, backup_dir)
-        print(f"   -> Journal logs backed up to: {journal_path}")
-
-        print("   -> Attempting restart...")
-        subprocess.run(["systemctl", "reset-failed", args.relay_service], check=False)
-        subprocess.run(["systemctl", "restart", args.relay_service], check=False)
-        time.sleep(1)
-
-        verify_relay = subprocess.run(
-            ["systemctl", "is-active", "--quiet", args.relay_service],
-            check=False,
-        )
-        if verify_relay.returncode == 0:
-            print("   -> Restart SUCCESS.")
-        else:
-            print("   -> Restart FAILED.")
+    if service_active(args.relay_service):
+        print(f"[OK] Syslog Formatter ({args.relay_service}) is running.")
     else:
-        print("[OK] Syslog Formatter is running.")
+        critical = True
+        print(f"[CRITICAL] Syslog Formatter ({args.relay_service}) is DOWN!")
+        print(f"   -> Inspect: journalctl -u {args.relay_service} -n 50")
 
-    # Port check catches a worker bind-crash-loop that systemd reports
-    # as "active" (the supervisor process itself never dies).
     if udp_port_bound(args.relay_port):
         print(f"[OK] UDP {args.relay_port} is bound (relay listener).")
     else:
@@ -543,10 +432,6 @@ def healthcheck(args):
             f"[CRITICAL] UDP {args.relay_port} is NOT bound; "
             "relay workers are not listening!"
         )
-
-    removed = prune_backups(backup_dir, args.backup_retain)
-    if removed:
-        print(f"Pruned {removed} old backup file(s) from {backup_dir}.")
 
     print("=== Check Finished ===")
     print("")
@@ -587,6 +472,14 @@ def build_parser(config_defaults):
         default=config_defaults.get("target_port", DEFAULT_TARGET_PORT),
     )
     run_parser.add_argument(
+        "--protocol-value",
+        default=config_defaults.get("protocol_value", DEFAULT_PROTOCOL_VALUE),
+        help=(
+            "Value injected as the proto= tag FlowLink parses as protocol "
+            "(default 6 = TCP). Empty string disables injection."
+        ),
+    )
+    run_parser.add_argument(
         "--workers",
         type=int,
         default=config_defaults.get("workers", DEFAULT_WORKER_COUNT),
@@ -598,30 +491,13 @@ def build_parser(config_defaults):
         help="Run FlowLink and relay health checks.",
     )
     health_parser.add_argument(
-        "--flowlink-cmd",
-        default=config_defaults.get("flowlink_cmd", DEFAULT_FLOWLINK_CMD),
-    )
-    health_parser.add_argument(
-        "--flowlink-config",
-        default=config_defaults.get("flowlink_config", DEFAULT_FLOWLINK_CONFIG),
-    )
-    health_parser.add_argument(
-        "--flowlink-log",
-        default=config_defaults.get("flowlink_log", DEFAULT_FLOWLINK_LOG),
+        "--flowlink-service",
+        default=config_defaults.get("flowlink_service", DEFAULT_FLOWLINK_SERVICE),
+        help="systemd unit of the FlowLink daemon (installed by the RPM).",
     )
     health_parser.add_argument(
         "--relay-service",
         default=config_defaults.get("relay_service", DEFAULT_RELAY_SERVICE),
-    )
-    health_parser.add_argument(
-        "--backup-dir",
-        default=config_defaults.get("backup_dir", DEFAULT_BACKUP_DIR),
-    )
-    health_parser.add_argument(
-        "--backup-retain",
-        type=int,
-        default=config_defaults.get("backup_retain", DEFAULT_BACKUP_RETAIN),
-        help="Keep only the newest N files in --backup-dir (0 disables pruning).",
     )
     health_parser.add_argument(
         "--relay-port",
@@ -634,14 +510,6 @@ def build_parser(config_defaults):
         type=int,
         default=config_defaults.get("target_port", DEFAULT_TARGET_PORT),
         help="UDP port FlowLink must have bound.",
-    )
-    health_parser.add_argument(
-        "--restart-wait-seconds",
-        type=int,
-        default=config_defaults.get(
-            "restart_wait_seconds",
-            DEFAULT_RESTART_WAIT_SECONDS,
-        ),
     )
     health_parser.set_defaults(handler=healthcheck)
 

@@ -17,5 +17,7 @@ sysctl -w net.core.rmem_default=26214400
 # 2. 調整 UDP 特定 Buffer
 sysctl -w net.ipv4.udp_mem="8388608 12582912 16777216"
 
-# log 輪替：已由 deploy.sh 部署 /etc/logrotate.d/flowlink 取代，
-# 不要再掛 03:00 truncate cron（舊版升級時記得從 crontab 移除）。
+# log 輪替：FlowLink 2.0.0 起由 RPM 的 /etc/logrotate.d/flowlink-logrotate.conf
+# 處理（/var/log/illumio-flowlink/flowlink.log）。不要自建規則，也不要再掛
+# 03:00 truncate cron；舊部署留下的 /etc/logrotate.d/flowlink 會讓
+# logrotate.service 每天失敗，deploy.sh 會自動移除。

@@ -1,9 +1,23 @@
-pce_addr: pce.lab.local:8443
-# Path to the credentials file ("api_<key_id> <secret>", space separated).
-# FlowLink opens this path itself; do NOT put the literal key here.
-api_key: /opt/flowlink/api_info
-data_directory: /opt/flowlink/data
-aggregation_minutes: 10
+# Forcepoint syslog consumer for FlowLink 2.0.0+.
+#
+# This is NOT a standalone config any more. Since 2.0.0 FlowLink runs as a
+# Linux service that always reads /etc/illumio-flowlink/config.yaml, so the
+# `consumers:` entry below has to be merged into that file (which also holds
+# the site's netflow/ipfix consumers and PCE credentials), then:
+#
+#   sudo systemctl restart illumio-flowlink
+#
+# Field mapping notes:
+#   - src / dst / dpt / start are what syslog-formatter.py keeps from the raw
+#     CEF; everything else (suser, cs1, request — the fields carrying Chinese
+#     text and long URLs) is stripped before FlowLink ever sees it.
+#   - `protocol: proto` reads the `proto=` tag that the relay injects. Real
+#     Forcepoint proxy events carry no protocol tag at all, and `protocol` is
+#     a required property of the text parser, so the relay synthesises it
+#     (default 6 = TCP, see [relay] protocol_value in syslog-formatter.ini).
+#   - timestamp_format: unix — the relay truncates the 13-digit millisecond
+#     timestamps to 10-digit seconds.
+
 consumers:
   - name: Forcepoint_CEF_log
     parser:
@@ -12,10 +26,41 @@ consumers:
         src_ip: src
         dst_ip: dst
         dst_port: dpt
-        protocol: tcp
+        protocol: proto
         timestamp: start
         timestamp_format: unix
     connectors:
       - type: udp
         properties:
-          ports: '5514'
+          ports: "5514"
+
+# --- Full example of the merged /etc/illumio-flowlink/config.yaml -----------
+#
+# pce_addr: pce.lab.local:8443
+# org_id: 1
+# api_key: /etc/illumio-flowlink/api_info
+# data_directory: /var/lib/illumio-flowlink/data
+# aggregation_minutes: 10
+# consumers:
+#   - name: netflow
+#     parser:
+#       type: netflow
+#     connectors:
+#       - type: udp
+#         properties:
+#           ports: "2055"
+#
+#   - name: Forcepoint_CEF_log
+#     parser:
+#       type: text
+#       properties:
+#         src_ip: src
+#         dst_ip: dst
+#         dst_port: dpt
+#         protocol: proto
+#         timestamp: start
+#         timestamp_format: unix
+#     connectors:
+#       - type: udp
+#         properties:
+#           ports: "5514"
