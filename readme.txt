@@ -121,6 +121,9 @@ Repo 中主要檔案如下：
 - [config-syslog.yml](config-syslog.yml)（要**併入** `/etc/illumio-flowlink/config.yaml` 的 consumer 片段）
 - [systemd/syslog-formatter.service](systemd/syslog-formatter.service)
 - [deploy.sh](deploy.sh)
+- [docs/flowlink-2.0.0-migration-runbook.md](docs/flowlink-2.0.0-migration-runbook.md)：
+  舊環境遷移到 2.0.0 的逐步程序（見 §7.4）
+- [docs/superpowers/specs/](docs/superpowers/specs/)：設計文件（歷史紀錄）
 
 ## 5. 執行方式
 
@@ -245,26 +248,20 @@ python3 /opt/flowlink/syslog-formatter.py --config /opt/flowlink/syslog-formatte
 | `flowlink-healthcheck.timer`（自建） | 已移除，改為手動 healthcheck |
 | `/etc/logrotate.d/flowlink`（自建） | `/etc/logrotate.d/flowlink-logrotate.conf`（RPM） |
 
-升級後的收尾：
+完整的逐步遷移程序（含盤點分支、備份、RPM 替換、設定遷移、分層驗證、回滾、
+以及實機踩過的坑）另外寫成 runbook：
 
-```bash
-# 1. 確認 RPM 版本與服務
-rpm -qa | grep illumio-flowlink
-systemctl status illumio-flowlink
+- [docs/flowlink-2.0.0-migration-runbook.md](docs/flowlink-2.0.0-migration-runbook.md)
+- 網頁版：https://claude.ai/code/artifact/eb9bb641-7a00-4d27-bd46-d4f00787fe18
 
-# 2. 把 syslog consumer 併進官方設定檔（§7.2），重啟 FlowLink
+要遷移舊主機請直接照 runbook 走，不要只看本節。以下是最容易出事的兩點摘要：
 
-# 3. 跑 deploy.sh 清掉舊檔並重新部署 relay
-sudo ./deploy.sh --dry-run
-sudo ./deploy.sh
-
-# 4. 舊資料目錄確認沒用到之後再刪（升級後不再寫入）
-ls -la /opt/flowlink/data/
-```
-
-注意：升級時 `/etc/illumio-flowlink/config.yaml` 會是 RPM 的預設值（只有
-netflow consumer），**syslog consumer 不會被保留**，必須自己併回去，否則
-relay 轉出的封包沒有人接收，資料會無聲消失。
+1. 升級時 `/etc/illumio-flowlink/config.yaml` 會被換成 RPM 的預設值（只有 netflow
+   consumer），**你原本的 consumer 定義不會保留**。syslog consumer 必須自己併回去，
+   否則 relay 照常運作但轉出的封包沒有人接收，資料無聲消失。動手前先抄下現行設定
+   裡所有 consumer 的 port 與 parser 對應。
+2. 併回去時**不要照抄舊的 `protocol: tcp`**，要改成 `protocol: proto`（見 §3.1）。
+   照抄的話 FlowLink 會把每一筆都丟掉。
 
 ## 8. 日常健康檢查
 
