@@ -123,7 +123,6 @@ Repo 中主要檔案如下：
 - [deploy.sh](deploy.sh)
 - [docs/flowlink-2.0.0-migration-runbook.md](docs/flowlink-2.0.0-migration-runbook.md)：
   舊環境遷移到 2.0.0 的逐步程序（見 §7.5）
-- [docs/superpowers/specs/](docs/superpowers/specs/)：設計文件（歷史紀錄）
 
 ## 5. 執行方式
 
@@ -258,7 +257,7 @@ sudo ./deploy.sh
 ```
 
 **包內不含 FlowLink RPM**（授權軟體，需自 Illumio Support Portal 取得），
-請另外一起帶。`docs/superpowers/` 的設計文件屬內部歷史紀錄，不會打包。
+請另外一起帶。
 
 ### 7.5 從 FlowLink 1.x 部署升級到 2.0.0
 
