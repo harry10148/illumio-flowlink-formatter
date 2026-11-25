@@ -17,8 +17,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${1:-${REPO_DIR}/dist}"
 cd "${REPO_DIR}"
 
-# Files the bundle ships. docs/superpowers/ is deliberately left out — it is
-# internal design history, not something a site operator needs.
+# Files the bundle ships.
 FILES=(
     deploy.sh
     syslog-formatter.py
